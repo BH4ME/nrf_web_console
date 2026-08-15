@@ -1,6 +1,5 @@
-const { Pool } = require("pg");
-
 let pool = null;
+let poolConstructorOverride = null;
 
 function isPostgresEnabled(config) {
   return Boolean(
@@ -28,6 +27,7 @@ function getPool(config) {
   }
 
   if (!pool) {
+    const Pool = poolConstructorOverride || require("pg").Pool;
     pool = new Pool({
       host: config.PG_HOST,
       port: Number(config.PG_PORT || 5432),
@@ -43,10 +43,15 @@ function getPool(config) {
   return pool;
 }
 
+function setPoolConstructorForTests(poolConstructor) {
+  pool = null;
+  poolConstructorOverride = poolConstructor || null;
+}
+
 async function resetPool() {
   const current = pool;
   pool = null;
-  if (current) {
+  if (current && typeof current.end === "function") {
     await current.end();
   }
 }
@@ -54,5 +59,6 @@ async function resetPool() {
 module.exports = {
   getPool,
   isPostgresEnabled,
+  setPoolConstructorForTests,
   resetPool
 };

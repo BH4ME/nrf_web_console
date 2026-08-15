@@ -2,6 +2,7 @@ const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const dotenv = require("dotenv");
+const packageInfo = require("../package.json");
 const { startMqttIngest } = require("./mqttClient");
 const { startCoapIngest } = require("./coapServer");
 const {
@@ -9,10 +10,19 @@ const {
   getAllNodes,
   getNode,
   getNodeHistory,
-  buildSensorSnapshotMap
+  buildSensorSnapshotMap,
+  setNodeServiceState,
+  getNodeServiceCommand,
+  restoreNodeHistory
 } = require("./nodeStore");
+const {
+  commandId: createMaintenanceCommandId,
+  saveMaintenanceState,
+  loadMaintenanceStates,
+  persistNodeMaintenance
+} = require("./maintenanceStore");
 const { startUpstreamPuller, pullOnce } = require("./upstreamPuller");
-const { createHistoryStore, normalizeLimit } = require("./historyStore");
+const { createHistoryStore, normalizeLimit, compactHistoryRecord } = require("./historyStore");
 const { ensureSchema, storeTelemetryMessage, loadLatestTelemetry } = require("./telemetryStore");
 
 dotenv.config();
@@ -46,7 +56,7 @@ app.use(express.static(path.join(__dirname, "..", "web")));
 const config = {
   PORT: Number(process.env.PORT || 8080),
   MQTT_BROKER_URL: process.env.MQTT_BROKER_URL || "mqtt://localhost:1883",
-  MQTT_TOPIC: process.env.MQTT_TOPIC || "nrf/+/telemetry",
+  MQTT_TOPIC: process.env.MQTT_TOPIC || "sensor/+/data",
   MQTT_USERNAME: process.env.MQTT_USERNAME || "",
   MQTT_PASSWORD: process.env.MQTT_PASSWORD || "",
   MQTT_CLIENT_ID: process.env.MQTT_CLIENT_ID || `nordic-web-dashboard-${Date.now()}`,
@@ -101,6 +111,38 @@ function requireWriteToken(req, res, next) {
   next();
 }
 
+function isSameOriginRequest(req) {
+  const origin = String(req.headers.origin || "").trim();
+  const host = String(req.headers.host || "").trim();
+  if (!origin || !host) {
+    return String(req.headers["sec-fetch-site"] || "").trim().toLowerCase() === "same-origin";
+  }
+  try {
+    const parsed = new URL(origin);
+    return parsed.host === host;
+  } catch {
+    return false;
+  }
+}
+
+function requireDashboardWrite(req, res, next) {
+  const expected = String(config.API_WRITE_TOKEN || "").trim();
+  const auth = String(req.headers.authorization || "");
+  const got = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+
+  if (expected && safeTokenEquals(got, expected)) {
+    next();
+    return;
+  }
+
+  if (isSameOriginRequest(req)) {
+    next();
+    return;
+  }
+
+  res.status(401).json({ error: "unauthorized" });
+}
+
 function requireReadToken(req, res, next) {
   const expected = String(config.READ_AUTH_TOKEN || "").trim();
   if (!expected) {
@@ -116,12 +158,21 @@ function requireReadToken(req, res, next) {
   next();
 }
 
+function isTruthyQuery(value) {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase();
+  return text === "1" || text === "true" || text === "yes";
+}
+
 if (!String(config.API_WRITE_TOKEN || "").trim()) {
   console.warn("[auth] API_WRITE_TOKEN is not set - write endpoints are disabled");
 }
 if (!String(config.READ_AUTH_TOKEN || "").trim()) {
   console.warn("[auth] READ_AUTH_TOKEN is not set - read endpoints are public");
 }
+
+const historyStore = createHistoryStore(config);
 
 async function restoreLatestNodes() {
   try {
@@ -134,8 +185,26 @@ async function restoreLatestNodes() {
         restoredFromStorage: true
       });
     }
+    if (historyStore.isEnabled() && items.length) {
+      let restoredPoints = 0;
+      for (const item of items) {
+        const history = await historyStore.getHistory(item.nodeId, 300);
+        restoredPoints += restoreNodeHistory(item.nodeId, history);
+      }
+      console.log(`[pg] restored ${restoredPoints} history point(s) for ${items.length} node(s)`);
+    }
     if (items.length) {
       console.log(`[pg] restored ${items.length} node(s) from telemetry store`);
+    }
+    const maintenanceItems = await loadMaintenanceStates(config);
+    for (const item of maintenanceItems) {
+      setNodeServiceState(item.nodeId, item.state, {
+        commandId: item.commandId,
+        updatedAt: item.updatedAt
+      });
+    }
+    if (maintenanceItems.length) {
+      console.log(`[pg] restored ${maintenanceItems.length} maintenance state(s)`);
     }
   } catch (err) {
     console.warn(`[pg] telemetry store init failed: ${err.message}`);
@@ -147,10 +216,9 @@ restoreLatestNodes();
 startMqttIngest(config);
 startCoapIngest(config);
 startUpstreamPuller(config);
-const historyStore = createHistoryStore(config);
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "nordic-web-dashboard", ts: Date.now() });
+  res.json({ ok: true, service: "nordic-web-dashboard", version: packageInfo.version, ts: Date.now() });
 });
 
 app.get("/api/nodes", requireReadToken, (_req, res) => {
@@ -174,6 +242,7 @@ app.get("/api/nodes/:nodeId/history", requireReadToken, async (req, res) => {
   try {
     const nodeId = String(req.params.nodeId || "").toLowerCase();
     const limit = normalizeLimit(req.query.limit, 100);
+    const compact = isTruthyQuery(req.query.compact);
     let items = [];
     let source = "postgres";
     try {
@@ -189,7 +258,7 @@ app.get("/api/nodes/:nodeId/history", requireReadToken, async (req, res) => {
     res.json({
       nodeId,
       source,
-      items
+      items: compact ? items.map(compactHistoryRecord) : items
     });
   } catch (err) {
     res.status(500).json({ error: "history_query_failed", reason: err.message });
@@ -200,7 +269,51 @@ app.get("/api/nodes/:nodeId/history", requireReadToken, async (req, res) => {
 // POST /api/ingest with json: { nodeId, temperature, humidity, battery, ... }
 app.post("/api/ingest", requireWriteToken, (req, res) => {
   const saved = upsertNodeTelemetry(req.body || {}, req.body?.nodeId, { source: "api" });
+  persistNodeMaintenance(config, saved).catch((err) => {
+    console.warn(`[pg] maintenance store update failed: ${err.message}`);
+  });
   res.json({ ok: true, item: saved });
+});
+
+app.get("/api/nodes/:nodeId/maintenance", requireReadToken, (req, res) => {
+  const found = getNode(req.params.nodeId);
+  if (!found) {
+    res.status(404).json({ error: "node_not_found" });
+    return;
+  }
+  res.json({
+    nodeId: found.nodeId,
+    serviceState: found.serviceState || "NONE",
+    serviceCommandId: found.serviceCommandId || null,
+    serviceLabel: found.epaperScreen?.serviceLabel || ""
+  });
+});
+
+app.post("/api/nodes/:nodeId/maintenance", requireDashboardWrite, async (req, res) => {
+  try {
+    const nodeId = String(req.params.nodeId || "").trim();
+    const desiredState = String(req.body?.state || "DONE").trim().toUpperCase();
+    const state = desiredState === "REQUIRED" ? "REQUIRED" : "DONE";
+    const command = state === "DONE" ? createMaintenanceCommandId() : "";
+    const saved = setNodeServiceState(nodeId, state, {
+      commandId: command,
+      updatedAt: Date.now()
+    });
+    await saveMaintenanceState(config, {
+      nodeId: saved.nodeId,
+      state: saved.state,
+      commandId: saved.commandId
+    });
+    res.json({
+      ok: true,
+      nodeId: saved.nodeId,
+      serviceState: saved.state,
+      commandId: saved.commandId,
+      command: getNodeServiceCommand(nodeId)
+    });
+  } catch (err) {
+    res.status(500).json({ error: "maintenance_update_failed", reason: err.message });
+  }
 });
 
 app.post("/api/internal/store", requireWriteToken, async (req, res) => {

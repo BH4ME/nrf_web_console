@@ -1,12 +1,16 @@
-const coap = require("coap");
 const crypto = require("crypto");
-const { upsertNodeTelemetry } = require("./nodeStore");
-const { storeTelemetryMessage } = require("./telemetryStore");
+const { upsertNodeTelemetry, getNodeServiceCommand } = require("./nodeStore");
+const { persistNodeMaintenance } = require("./maintenanceStore");
 
 function getNodeIdFromPath(urlPath) {
   const parts = String(urlPath || "").split("/").filter(Boolean);
+  const sensorIndex = parts.indexOf("sensor");
+
   if (parts.length >= 2 && parts[0] === "telemetry") {
     return parts[1];
+  }
+  if (sensorIndex >= 0 && parts.length > sensorIndex + 1) {
+    return parts[sensorIndex + 1];
   }
   return "unknown";
 }
@@ -37,6 +41,8 @@ function startCoapIngest(config) {
 
   const port = Number(config.COAP_PORT || 5683);
   const host = config.COAP_HOST || "0.0.0.0";
+  const coap = require("coap");
+  const { storeTelemetryMessage } = require("./telemetryStore");
   const server = coap.createServer();
   const expectedToken = String(config.COAP_AUTH_TOKEN || "").trim();
   if (!expectedToken) {
@@ -72,6 +78,9 @@ function startCoapIngest(config) {
     const cleanPayload = stripAuthFields(payload);
     const fallbackNodeId = getNodeIdFromPath(pathName);
     const saved = upsertNodeTelemetry(cleanPayload, fallbackNodeId, { source: "coap" });
+    persistNodeMaintenance(config, saved).catch((err) => {
+      console.warn(`[pg] maintenance store update failed: ${err.message}`);
+    });
     storeTelemetryMessage(config, {
       nodeId: saved.nodeId,
       topic: `coap:${pathName}`,
@@ -81,8 +90,9 @@ function startCoapIngest(config) {
       console.warn(`[pg] coap store failed: ${err.message}`);
     });
 
-    res.code = "2.04";
-    res.end("ok");
+    const command = getNodeServiceCommand(saved.nodeId);
+    res.code = command ? "2.05" : "2.04";
+    res.end(JSON.stringify(command || { ok: true }));
     console.log(
       `[coap] node=${saved.nodeId} temp=${saved.temperature} hum=${saved.humidity} battery=${saved.battery}`
     );
@@ -98,4 +108,4 @@ function startCoapIngest(config) {
   return server;
 }
 
-module.exports = { startCoapIngest, stripAuthFields };
+module.exports = { startCoapIngest, stripAuthFields, getNodeIdFromPath };

@@ -72,6 +72,13 @@ test("encryption badge should show UNKNOWN when encrypted flag is missing", () =
   assert.equal(encryptionBadge(item), "UNKNOWN");
 });
 
+test("encryption badge should infer compact firmware modes", () => {
+  assert.equal(encryptionBadge({ raw: { mode: "mqtt_tls" } }), "TLS");
+  assert.equal(encryptionBadge({ raw: { mode: "coap_dtls" } }), "DTLS");
+  assert.equal(encryptionBadge({ raw: { mode: "mqtt_plain" } }), "PLAIN");
+  assert.equal(encryptionBadge({ raw: { mode: "coap_plain" } }), "PLAIN");
+});
+
 test("encryption badge should not infer DTLS from rest-only snapshots", () => {
   const item = {
     sourceLastSeenAt: { rest: Date.now() },

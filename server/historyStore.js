@@ -13,19 +13,27 @@ function maybeParsePayload(raw) {
   return {};
 }
 
+function normalizeVoltage(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.abs(n) > 20 ? n / 1000 : n;
+}
+
 function buildNodeRecord(row, nodeId) {
   const payload = maybeParsePayload(row.payload);
   const timestamp = row.timestamp ? new Date(row.timestamp).getTime() : Date.now();
 
   const temp =
     payload.temperature ??
+    payload.t ??
     payload.temp ??
     payload.temp_c ??
     payload.tempC ??
     null;
 
-  const hum = payload.humidity ?? payload.humi ?? payload.hum ?? null;
-  const battery = payload.battery ?? payload.battery_mv ?? payload.battery_pct ?? null;
+  const hum = payload.humidity ?? payload.h ?? payload.humi ?? payload.hum ?? null;
+  const battery = payload.battery ?? payload.bat ?? payload.battery_pct ?? payload.batteryPercent ?? null;
 
   return {
     nodeId,
@@ -33,9 +41,111 @@ function buildNodeRecord(row, nodeId) {
     temperature: temp,
     humidity: hum,
     battery,
+    voltage: normalizeVoltage(payload.voltage ?? payload.vbat ?? payload.vbat_v ?? payload.mv ?? payload.battery_mv),
+    rssi: payload.rssi ?? payload.signal_dbm ?? null,
+    mode: payload.mode ?? null,
+    wakeReason: payload.wake ?? payload.wake_reason ?? payload.wakeReason ?? null,
+    motionEvent: payload.mot ?? payload.motion_event ?? payload.motionEvent ?? null,
+    status: payload.status ?? payload.state ?? null,
+    assetEvent: payload.evt ?? payload.asset_event ?? payload.assetEvent ?? null,
+    alarmActive: payload.alarm ?? payload.alarm_active ?? payload.alarmActive ?? null,
+    abnormalEvent: payload.abn ?? payload.abnormal_event ?? payload.abnormalEvent ?? null,
+    sustainedMotion: payload.msus ?? payload.sustained_motion ?? payload.sustainedMotion ?? null,
+    motionWindowIrqCount: payload.mw ?? payload.motion_window_irq_count ?? payload.motionWindowIrqCount ?? null,
+    motionDeltaMg: payload.md ?? payload.motion_delta_mg ?? payload.motionDeltaMg ?? null,
+    motionWindowSeconds: payload.ms ?? payload.motion_window_seconds ?? payload.motionWindowSeconds ?? null,
+    sampleSeq: payload.seq ?? payload.sample_seq ?? payload.sampleSeq ?? null,
+    firmwareVersion:
+      payload.firmware_version ??
+      payload.firmwareVersion ??
+      payload.fw ??
+      payload.version ??
+      payload.firmware?.version ??
+      null,
+    cachedRecords: payload.cache ?? payload.cached_records ?? payload.cachedRecords ?? null,
+    powerSource: payload.ps ?? payload.power_source ?? payload.powerSource ?? null,
+    powerSourceValid: payload.psv ?? payload.power_source_valid ?? payload.powerSourceValid ?? null,
+    batteryPresent: payload.bp ?? payload.battery_present ?? payload.batteryPresent ?? null,
+    batteryPresenceValid: payload.bpv ?? payload.battery_presence_valid ?? payload.batteryPresenceValid ?? null,
+    batteryPowered: payload.bon ?? payload.battery_powered ?? payload.batteryPowered ?? null,
+    charging: payload.chg ?? payload.charging ?? null,
+    chargeComplete: payload.full ?? payload.charge_complete ?? payload.chargeComplete ?? null,
+    pwrOnly: payload.po ?? payload.pwr_only ?? payload.pwrOnly ?? null,
+    externalPowerPresent: payload.ext ?? payload.external_power_present ?? payload.externalPowerPresent ?? null,
+    powerValid: payload.pwr ?? payload.power_valid ?? payload.powerValid ?? null,
+    accelXMg: payload.ax ?? payload.accel_x_mg ?? payload.accelXMg ?? null,
+    accelYMg: payload.ay ?? payload.accel_y_mg ?? payload.accelYMg ?? null,
+    accelZMg: payload.az ?? payload.accel_z_mg ?? payload.accelZMg ?? null,
+    vibrationMg: payload.vib ?? payload.vibration_mg ?? payload.vibrationMg ?? null,
+    tiltDeg: payload.tilt ?? payload.tilt_deg ?? payload.tiltDeg ?? null,
+    shockG: payload.shock ?? payload.shock_g ?? payload.shockG ?? payload.accel_g ?? payload.accelG ?? null,
+    epaperStatus: payload.epd ?? payload.epaper_status ?? payload.epaperStatus ?? payload.display_status ?? null,
+    epaperOrientation: payload.ori ?? payload.epaper_orientation ?? payload.epaperOrientation ?? payload.display_orientation ?? null,
+    epaperRefreshCount:
+      payload.epdc ?? payload.epaper_refresh_count ?? payload.epaperRefreshCount ?? payload.display_refresh_count ?? null,
+    epaperDisplaySampleSeq:
+      payload.epdseq ?? payload.epaper_display_sample_seq ?? payload.epaperDisplaySampleSeq ?? payload.display_sample_seq ?? null,
+    epaperRefreshPeriodSeconds:
+      payload.epdi ??
+      payload.epaper_refresh_period_seconds ??
+      payload.epaperRefreshPeriodSeconds ??
+      payload.display_refresh_period_seconds ??
+      null,
+    epaperRefreshLastResult:
+      payload.epr ??
+      payload.epaper_refresh_last_result ??
+      payload.epaperRefreshLastResult ??
+      payload.display_refresh_last_result ??
+      null,
+    epaperLastRefresh: payload.epaper_last_refresh ?? payload.epaperLastRefresh ?? payload.display_last_refresh ?? null,
     source: row.source || null,
     raw: payload
   };
+}
+
+const COMPACT_HISTORY_FIELDS = [
+  "nodeId",
+  "timestamp",
+  "temperature",
+  "humidity",
+  "battery",
+  "voltage",
+  "rssi",
+  "mode",
+  "wakeReason",
+  "motionEvent",
+  "status",
+  "epaperStatus",
+  "sampleSeq",
+  "firmwareVersion",
+  "cachedRecords",
+  "serviceState",
+  "source"
+];
+
+function copyPresentField(target, source, field) {
+  const value = source?.[field];
+  if (value !== null && value !== undefined && value !== "") {
+    target[field] = value;
+  }
+}
+
+function compactHistoryRecord(record) {
+  const compact = {};
+  for (const field of COMPACT_HISTORY_FIELDS) {
+    copyPresentField(compact, record, field);
+  }
+
+  if (record?.epaperScreen && typeof record.epaperScreen === "object") {
+    const epaperScreen = {};
+    copyPresentField(epaperScreen, record.epaperScreen, "status");
+    copyPresentField(epaperScreen, record.epaperScreen, "serviceState");
+    if (Object.keys(epaperScreen).length) {
+      compact.epaperScreen = epaperScreen;
+    }
+  }
+
+  return compact;
 }
 
 function topicForNodeId(nodeId) {
@@ -146,5 +256,6 @@ module.exports = {
   topicForNodeIdByTemplate,
   hasTopicPlaceholder,
   normalizeLimit,
-  buildNodeRecord
+  buildNodeRecord,
+  compactHistoryRecord
 };

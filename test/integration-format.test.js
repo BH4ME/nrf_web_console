@@ -8,6 +8,7 @@ const {
   getNodeHistory,
   buildSensorSnapshotMap,
   pruneSnapshotNodes,
+  restoreNodeHistory,
   resetStore
 } = require("../server/nodeStore");
 const { pullOnce } = require("../server/upstreamPuller");
@@ -23,14 +24,14 @@ test("upstream object map format should map key as fallback node id", () => {
   assert.deepEqual(ids, ["a1b2", "c3d4"]);
 });
 
-test("zero coordinates should be treated as missing gps", () => {
+test("zero legacy coordinates should be treated as missing", () => {
   resetStore();
   const row = upsertNodeTelemetry({ mac_last4: "9512", lat: 0, lng: 0 }, "9512", { source: "mqtt" });
   assert.equal(row.lat, null);
   assert.equal(row.lng, null);
 });
 
-test("explicit zero gps should clear stale coordinates", () => {
+test("explicit zero legacy coordinates should clear stale coordinates", () => {
   resetStore();
   upsertNodeTelemetry(
     { mac_last4: "9512", lat: 31.2304, lng: 121.4737 },
@@ -109,6 +110,51 @@ test("rest snapshot should not bump device seen time", async () => {
   assert.ok(second.lastSeenAt >= first.lastSeenAt);
 });
 
+test("partial rest snapshot should not clear live telemetry fields", () => {
+  resetStore();
+  upsertNodeTelemetry(
+    {
+      id: "9512-mqtt-tls",
+      v: 2,
+      seq: 7,
+      mode: "mqtt_tls",
+      wake: "motion",
+      mot: 1,
+      t: 24.6,
+      h: 58.2,
+      bat: 87,
+      mv: 4070,
+      rssi: -91,
+      cache: 3,
+      ax: 12,
+      ay: -28,
+      az: 1001
+    },
+    "9512-mqtt-tls",
+    { source: "mqtt" }
+  );
+
+  const row = upsertNodeTelemetry({ id: "9512-mqtt-tls", status: "snapshot-ok" }, "9512-mqtt-tls", {
+    source: "rest",
+    isSnapshot: true
+  });
+
+  assert.equal(row.temperature, 24.6);
+  assert.equal(row.humidity, 58.2);
+  assert.equal(row.battery, 87);
+  assert.equal(row.voltage, 4.07);
+  assert.equal(row.rssi, -91);
+  assert.equal(row.mode, "mqtt_tls");
+  assert.equal(row.wakeReason, "motion");
+  assert.equal(row.motionEvent, 1);
+  assert.equal(row.sampleSeq, 7);
+  assert.equal(row.cachedRecords, 3);
+  assert.equal(row.accelXMg, 12);
+  assert.equal(row.accelYMg, -28);
+  assert.equal(row.accelZMg, 1001);
+  assert.equal(row.status, "snapshot-ok");
+});
+
 test("mqtt and coap sources should bump device seen time", async () => {
   resetStore();
   const first = upsertNodeTelemetry({ mac_last4: "a1b2", temperature: 10 }, "a1b2", { source: "mqtt" });
@@ -138,6 +184,305 @@ test("firmware mode-specific node ids should render as separate cards", () => {
     .sort();
 
   assert.deepEqual(ids, ["9512-coap-dtls", "9512-coap-plain", "9512-mqtt-plain", "9512-mqtt-tls"]);
+});
+
+test("9151 compact v2 payload should normalize telemetry and motion fields", () => {
+  resetStore();
+  const row = upsertNodeTelemetry(
+    {
+      v: 2,
+      id: "9512-mqtt-plain",
+      seq: 42,
+      mode: "mqtt_plain",
+      wake: "motion",
+      mot: 1,
+      t: 24.6,
+      h: 58.2,
+      bat: 87,
+      mv: 4070,
+      rssi: -91,
+      cache: 3,
+      ax: 12,
+      ay: -28,
+      az: 1001,
+      vib: 1001,
+      tilt: 2,
+      shock: 1.001
+    },
+    "topic-fallback",
+    { source: "mqtt" }
+  );
+
+  assert.equal(row.nodeId, "9512-mqtt-plain");
+  assert.equal(row.temperature, 24.6);
+  assert.equal(row.humidity, 58.2);
+  assert.equal(row.battery, 87);
+  assert.equal(row.voltage, 4.07);
+  assert.equal(row.rssi, -91);
+  assert.equal(row.mode, "mqtt_plain");
+  assert.equal(row.wakeReason, "motion");
+  assert.equal(row.motionEvent, 1);
+  assert.equal(row.sampleSeq, 42);
+  assert.equal(row.cachedRecords, 3);
+  assert.equal(row.accelXMg, 12);
+  assert.equal(row.accelYMg, -28);
+  assert.equal(row.accelZMg, 1001);
+  assert.equal(row.vibrationMg, 1001);
+  assert.equal(row.tiltDeg, 2);
+  assert.equal(row.shockG, 1.001);
+  assert.equal(row.epaperScreen.assetId, "ISTAG-9512");
+  assert.equal(row.epaperScreen.status, "MOTION");
+  assert.equal(row.epaperScreen.statusShort, "MOVE");
+  assert.equal(row.epaperScreen.env.temperatureC, 24.6);
+  assert.equal(row.epaperScreen.env.humidityRh, 58.2);
+  assert.equal(row.epaperScreen.power.batteryPercent, 87);
+  assert.equal(row.epaperScreen.network.rssiDbm, -91);
+  assert.equal(row.epaperScreen.motion.shockMg, 1001);
+  assert.equal(row.epaperScreen.uplink.mode, "mqtt_plain");
+  assert.equal(row.epaperScreen.uplink.cachedRecords, 3);
+
+  const history = getNodeHistory("9512-mqtt-plain", 1);
+  assert.equal(history[0].sampleSeq, 42);
+  assert.equal(history[0].cachedRecords, 3);
+  assert.equal(history[0].shockG, 1.001);
+  assert.equal(history[0].epaperScreen.status, "MOTION");
+});
+
+test("9151 compact payload should mirror firmware status and EPD aliases", () => {
+  resetStore();
+  const row = upsertNodeTelemetry(
+    {
+      v: 2,
+      fw: "2.14",
+      id: "9512-coap-plain",
+      seq: 88,
+      mode: "coap_plain",
+      wake: "timer",
+      status: "LOWBAT",
+      evt: "heartbeat",
+      alarm: 0,
+      mot: 0,
+      abn: 0,
+      t: 24.6,
+      h: 58.2,
+      bat: 80,
+      mv: 4070,
+      rssi: -91,
+      cache: 3,
+      epd: "ready",
+      epdc: 7,
+      epdseq: 84,
+      epdi: 300,
+      epr: 1,
+      ori: "landscape",
+      ps: "pwr_only",
+      psv: 1,
+      bp: 0,
+      bpv: 1,
+      bon: 0,
+      chg: 0,
+      full: 0,
+      po: 1,
+      ext: 1,
+      pwr: 1
+    },
+    "topic-fallback",
+    { source: "coap" }
+  );
+
+  assert.equal(row.status, "LOWBAT");
+  assert.equal(row.assetEvent, "heartbeat");
+  assert.equal(row.alarmActive, 0);
+  assert.equal(row.abnormalEvent, 0);
+  assert.equal(row.firmwareVersion, "2.14");
+  assert.equal(row.epaperStatus, "ready");
+  assert.equal(row.epaperRefreshCount, 7);
+  assert.equal(row.epaperDisplaySampleSeq, 84);
+  assert.equal(row.epaperRefreshPeriodSeconds, 300);
+  assert.equal(row.epaperRefreshLastResult, 1);
+  assert.equal(row.epaperOrientation, "landscape");
+  assert.equal(row.powerSource, "pwr_only");
+  assert.equal(row.batteryPresent, 0);
+  assert.equal(row.epaperScreen.status, "LOWBAT");
+  assert.equal(row.epaperScreen.statusShort, "LOW");
+  assert.equal(row.epaperScreen.power.source, "pwr_only");
+  assert.equal(row.epaperScreen.power.batteryPresent, false);
+  assert.equal(row.epaperScreen.uplink.firmwareVersion, "2.14");
+});
+
+test("virtual EPD should follow the display-acknowledged sample when epdseq lags", () => {
+  resetStore();
+  upsertNodeTelemetry(
+    {
+      v: 2,
+      fw: "2.14",
+      id: "9512-coap-plain",
+      seq: 40,
+      mode: "coap_plain",
+      wake: "motion",
+      status: "MOTION",
+      evt: "movement",
+      mot: 1,
+      t: 24.6,
+      h: 58.2,
+      bat: 80,
+      mv: 4070,
+      rssi: -91,
+      cache: 3,
+      epd: "ready",
+      epdc: 2,
+      epdseq: 0,
+      ori: "landscape"
+    },
+    "topic-fallback",
+    { source: "coap" }
+  );
+
+  const row = upsertNodeTelemetry(
+    {
+      v: 2,
+      fw: "2.14",
+      id: "9512-coap-plain",
+      seq: 41,
+      mode: "coap_plain",
+      wake: "timer",
+      status: "NORMAL",
+      evt: "heartbeat",
+      mot: 0,
+      t: 24.7,
+      h: 58.0,
+      bat: 81,
+      mv: 4080,
+      rssi: -90,
+      cache: 2,
+      epd: "ready",
+      epdc: 3,
+      epdseq: 40,
+      ori: "landscape"
+    },
+    "topic-fallback",
+    { source: "coap" }
+  );
+
+  assert.equal(row.status, "NORMAL");
+  assert.equal(row.sampleSeq, 41);
+  assert.equal(row.epaperDisplaySampleSeq, 40);
+  assert.equal(row.epaperScreen.status, "MOTION");
+  assert.equal(row.epaperScreen.uplink.sampleSeq, 40);
+  assert.equal(row.epaperScreen.displayedSampleSeq, 40);
+});
+
+test("restored history should rehydrate the display-acknowledged sample", () => {
+  resetStore();
+  upsertNodeTelemetry(
+    {
+      v: 2,
+      fw: "2.15",
+      id: "3229-coap-plain",
+      seq: 41,
+      mode: "coap_plain",
+      wake: "timer",
+      status: "NORMAL",
+      t: 27.7,
+      h: 73.2,
+      bat: 79,
+      mv: 4018,
+      rssi: -115,
+      cache: 0,
+      epd: "ready",
+      epdc: 4,
+      epdseq: 40,
+      epr: 1,
+      ori: "landscape"
+    },
+    "3229-coap-plain",
+    { source: "coap-mqtt", observedAt: Date.parse("2026-08-14T12:00:10.000Z") }
+  );
+
+  restoreNodeHistory("3229-coap-plain", [
+    {
+      nodeId: "3229-coap-plain",
+      timestamp: Date.parse("2026-08-14T12:00:00.000Z"),
+      temperature: 27.9,
+      humidity: 72.7,
+      battery: 79,
+      voltage: 4.018,
+      rssi: -119,
+      mode: "coap_plain",
+      wakeReason: "motion",
+      motionEvent: 1,
+      status: "ALARM",
+      alarmActive: 1,
+      sampleSeq: 40,
+      cachedRecords: 0,
+      powerSource: "battery",
+      batteryPresent: 1,
+      powerValid: 1,
+      epaperStatus: "ready",
+      epaperOrientation: "landscape",
+      epaperRefreshCount: 3,
+      epaperDisplaySampleSeq: 39,
+      epaperRefreshLastResult: 1
+    }
+  ]);
+
+  const row = getNode("3229-coap-plain");
+  assert.equal(row.epaperScreen.displaySource, "history");
+  assert.equal(row.epaperScreen.displayedSampleSeq, 40);
+  assert.equal(row.epaperScreen.uplink.sampleSeq, 40);
+  assert.equal(row.epaperScreen.env.temperatureC, 27.9);
+  assert.equal(row.epaperScreen.status, "ALARM");
+});
+
+test("epaper screen should strip coap dtls suffix and mirror firmware thresholds", () => {
+  resetStore();
+  const alarm = upsertNodeTelemetry(
+    {
+      v: 2,
+      id: "9512-coap-dtls",
+      seq: 13,
+      mode: "coap_dtls",
+      wake: "timer",
+      mot: 0,
+      t: 40.0,
+      h: 61.0,
+      bat: 80,
+      mv: 4010,
+      rssi: -83,
+      cache: 3
+    },
+    "topic-fallback",
+    { source: "coap-mqtt" }
+  );
+
+  assert.equal(alarm.epaperScreen.assetId, "ISTAG-9512");
+  assert.equal(alarm.epaperScreen.status, "ALARM");
+  assert.equal(alarm.epaperScreen.statusShort, "ALRM");
+  assert.equal(alarm.epaperScreen.motion.valid, false);
+  assert.equal(alarm.epaperScreen.motion.shockMg, null);
+
+  const lowBattery = upsertNodeTelemetry(
+    {
+      v: 2,
+      id: "9512-coap-plain",
+      seq: 14,
+      mode: "coap_plain",
+      wake: "timer",
+      mot: 0,
+      t: 24.0,
+      h: 55.0,
+      bat: 14,
+      mv: 3520,
+      rssi: -96,
+      cache: 2
+    },
+    "topic-fallback",
+    { source: "coap-mqtt" }
+  );
+
+  assert.equal(lowBattery.epaperScreen.assetId, "ISTAG-9512");
+  assert.equal(lowBattery.epaperScreen.status, "LOWBAT");
+  assert.equal(lowBattery.epaperScreen.statusShort, "LOW");
 });
 
 test("sensor topic parser should preserve mode-specific node ids", () => {
@@ -203,6 +548,31 @@ test("upstream topic-like coap marker should map to coap-mqtt", async () => {
     const row = getAllNodes().find((x) => x.nodeId === "9512");
     assert.equal(row.lastSnapshotSource, "coap-mqtt");
     assert.equal(row.lastSource, "unknown");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("upstream compact mode should preserve mqtt/coap logical source", async () => {
+  resetStore();
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      items: [
+        { id: "9512-coap-dtls", mode: "coap_dtls", t: 24.6 },
+        { id: "9512-mqtt-tls", mode: "mqtt_tls", t: 24.7 },
+        { id: "9512-coap-plain", topic: "sensor/9512-coap-plain/data", mode: "coap_plain", t: 24.8 }
+      ]
+    })
+  });
+
+  try {
+    const result = await pullOnce({ UPSTREAM_PULL_URL: "http://fake.local/sensor" });
+    assert.equal(result.ok, true);
+    assert.equal(getNode("9512-coap-dtls").lastSnapshotSource, "coap-mqtt");
+    assert.equal(getNode("9512-mqtt-tls").lastSnapshotSource, "mqtt");
+    assert.equal(getNode("9512-coap-plain").lastSnapshotSource, "coap-mqtt");
   } finally {
     global.fetch = originalFetch;
   }
@@ -279,14 +649,21 @@ test("sensor snapshot map should expose latest node data keyed by node id", () =
       temp_c: 32,
       humidity: 55,
       battery_pct: 87,
-      lat: 31.23,
-      lng: 121.47
+      shock_g: 0.18,
+      epaper_status: "synced",
+      epaper_orientation: "landscape",
+      epaper_refresh_count: 12,
+      epaper_last_refresh: "2026-07-06T06:03:42.000Z"
     },
     "9512",
     { source: "mqtt" }
   );
 
   const snapshot = buildSensorSnapshotMap();
+  assert.equal(snapshot["9512"].epaper_screen.assetId, "ISTAG-9512");
+  assert.equal(snapshot["9512"].epaper_screen.status, "NORMAL");
+  assert.equal(snapshot["9512"].epaper_screen.env.temperatureC, 32);
+  assert.equal(snapshot["9512"].epaper_screen.motion.shockMg, 180);
   assert.deepEqual(snapshot["9512"], {
     nodeId: "9512",
     temperature: 32,
@@ -297,12 +674,47 @@ test("sensor snapshot map should expose latest node data keyed by node id", () =
     co2: null,
     pm25: null,
     status: null,
+    service_state: "NONE",
+    service_command_id: "",
     events: null,
     urgent: null,
+    mode: null,
+    wake_reason: null,
+    motion_event: null,
+    asset_event: null,
+    alarm_active: null,
+    abnormal_event: null,
+    sustained_motion: null,
+    motion_window_irq_count: null,
+    motion_delta_mg: null,
+    motion_window_seconds: null,
+    sample_seq: null,
+    firmware_version: null,
+    cached_records: null,
+    power_source: null,
+    power_source_valid: null,
+    battery_present: null,
+    battery_presence_valid: null,
+    battery_powered: null,
+    charging: null,
+    charge_complete: null,
+    pwr_only: null,
+    external_power_present: null,
+    power_valid: null,
+    accel_x_mg: null,
+    accel_y_mg: null,
+    accel_z_mg: null,
     vibration_mg: null,
     tilt_deg: null,
-    lat: 31.23,
-    lng: 121.47,
+    shock_g: 0.18,
+    epaper_status: "synced",
+    epaper_orientation: "landscape",
+    epaper_refresh_count: 12,
+    epaper_display_sample_seq: null,
+    epaper_refresh_period_seconds: null,
+    epaper_refresh_last_result: null,
+    epaper_last_refresh: "2026-07-06T06:03:42.000Z",
+    epaper_screen: snapshot["9512"].epaper_screen,
     source: "mqtt",
     updatedAt: snapshot["9512"].updatedAt,
     lastSeenAt: snapshot["9512"].lastSeenAt,

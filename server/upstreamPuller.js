@@ -4,7 +4,7 @@ function normalizeSource(value) {
   const text = String(value || "")
     .trim()
     .toLowerCase();
-  if (text === "coap" || text === "mqtt" || text === "rest" || text === "api") {
+  if (text === "coap" || text === "coap-mqtt" || text === "mqtt" || text === "rest" || text === "api") {
     return text;
   }
   return "";
@@ -32,11 +32,17 @@ function normalizeItems(data) {
 }
 
 function guessSourceFromTopicLikeFields(payload) {
-  const text = String(payload?.topic || payload?.source_topic || payload?.ingest_topic || "")
-    .trim()
-    .toLowerCase();
-  if (text.startsWith("coap/") || text.includes("/coap/") || text.includes("coap://")) {
-    return "coap-mqtt";
+  const candidates = [payload?.mode, payload?.topic, payload?.source_topic, payload?.ingest_topic];
+
+  for (const candidate of candidates) {
+    const text = String(candidate || "")
+      .trim()
+      .toLowerCase();
+    if (!text) continue;
+    if (text.startsWith("coap/") || text.includes("/coap/") || text.includes("coap://") || text.includes("coap_")) {
+      return "coap-mqtt";
+    }
+    if (text.includes("mqtt_")) return "mqtt";
   }
   return "";
 }

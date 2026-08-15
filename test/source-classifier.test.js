@@ -18,6 +18,16 @@ test("payload protocol coap should map to coap-mqtt", () => {
   assert.equal(source, "coap-mqtt");
 });
 
+test("firmware mqtt mode should map to mqtt", () => {
+  const source = detectMqttLogicalSource({ mode: "mqtt_tls", protocol: "mqtts" }, {});
+  assert.equal(source, "mqtt");
+});
+
+test("firmware coap mode bridged through mqtt should map to coap-mqtt", () => {
+  const source = detectMqttLogicalSource({ mode: "coap_dtls", protocol: "coaps" }, {});
+  assert.equal(source, "coap-mqtt");
+});
+
 test("mqtt5 user property marker should map to coap-mqtt", () => {
   const source = detectMqttLogicalSource(
     { temperature: 22 },
@@ -25,4 +35,3 @@ test("mqtt5 user property marker should map to coap-mqtt", () => {
   );
   assert.equal(source, "coap-mqtt");
 });
-

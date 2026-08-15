@@ -40,6 +40,23 @@ function collectPayloadEntries(item) {
   return entries;
 }
 
+function modeEncryptionRecord(item) {
+  const entries = collectPayloadEntries(item).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  for (const entry of entries) {
+    const mode = normalizeText(entry.payload?.mode);
+    if (mode.includes("dtls")) {
+      return { ...entry, parsed: { encrypted: true, label: "DTLS" } };
+    }
+    if (mode.includes("tls")) {
+      return { ...entry, parsed: { encrypted: true, label: "TLS" } };
+    }
+    if (mode.includes("plain")) {
+      return { ...entry, parsed: { encrypted: false, label: "PLAIN" } };
+    }
+  }
+  return null;
+}
+
 function sourceFamilyFromPayloads(item) {
   const keys = sourceKeys(item);
   if (keys.includes("coap") || keys.includes("coap-mqtt")) return "coap";
@@ -115,7 +132,10 @@ export function protocolBadge(item) {
 
 export function encryptionBadge(item) {
   const record = firstEncryptedRecord(item);
-  if (!record) return "UNKNOWN";
+  if (!record) {
+    const modeRecord = modeEncryptionRecord(item);
+    return modeRecord ? modeRecord.parsed.label : "UNKNOWN";
+  }
 
   const parsed = parseEncryptedValue(record.value);
   if (!parsed) return "UNKNOWN";

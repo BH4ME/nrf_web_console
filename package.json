@@ -1,6 +1,6 @@
 {
   "name": "nordic-web-dashboard",
-  "version": "0.9.3",
+  "version": "0.9.23",
   "description": "nRF node dashboard for CoAP/MQTT uplink data on your server",
   "main": "server/index.js",
   "scripts": {

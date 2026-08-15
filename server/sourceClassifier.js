@@ -9,9 +9,15 @@ function hasCoapMarker(value) {
   return text.includes("coap");
 }
 
+function hasMqttMarker(value) {
+  const text = normalizeText(value);
+  return text.includes("mqtt");
+}
+
 function pickPayloadSource(payload) {
   const candidates = [
     payload?.source,
+    payload?.mode,
     payload?.protocol,
     payload?.origin,
     payload?.ingest,
@@ -22,6 +28,7 @@ function pickPayloadSource(payload) {
 
   for (const c of candidates) {
     if (hasCoapMarker(c)) return "coap-mqtt";
+    if (hasMqttMarker(c)) return "mqtt";
   }
   return "";
 }

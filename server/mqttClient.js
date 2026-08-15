@@ -1,6 +1,7 @@
 const mqtt = require("mqtt");
 const fs = require("fs");
 const { upsertNodeTelemetry } = require("./nodeStore");
+const { persistNodeMaintenance } = require("./maintenanceStore");
 const { parseNodeIdFromTopic } = require("./topicParser");
 const { detectMqttLogicalSource } = require("./sourceClassifier");
 const { storeTelemetryMessage } = require("./telemetryStore");
@@ -59,6 +60,9 @@ function startMqttIngest(config) {
     const topicNodeId = parseNodeIdFromTopic(topic);
     const logicalSource = detectMqttLogicalSource(payload, packet);
     const saved = upsertNodeTelemetry(payload, topicNodeId, { source: logicalSource });
+    persistNodeMaintenance(config, saved).catch((err) => {
+      console.warn(`[pg] maintenance store update failed: ${err.message}`);
+    });
     storeTelemetryMessage(config, {
       nodeId: saved.nodeId,
       topic,
